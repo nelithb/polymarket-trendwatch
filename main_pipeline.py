@@ -173,14 +173,23 @@ class PolymarketPipeline:
             # Initialize Stage 2 parser
             self.stage2_parser = AIPolymarketParser(gemini_api_key=self.gemini_api_key)
             
-            # Run the AI parsing (includes preprocessing)
+            # Run the AI parsing (includes preprocessing) - don't save files during processing
             print("🧹 Preprocessing content...")
             print("🧠 Processing with Gemini AI...")
-            structured_data = self.stage2_parser.run_full_pipeline()
+            structured_data = self.stage2_parser.run_full_pipeline(save_files=False)
             
             if not structured_data:
                 self.print_stage_result(2, False, "AI parsing failed")
                 return False
+            
+            # Save the structured data to the expected output file
+            with open(self.output_files['stage2_structured'], 'w', encoding='utf-8') as f:
+                json.dump(structured_data, f, indent=2, ensure_ascii=False)
+            
+            # Also save cleaned content if it exists (for reference)
+            cleaned_file = "cleaned_polymarket_content.txt"
+            if os.path.exists(cleaned_file):
+                shutil.copyfile(cleaned_file, self.output_files['stage2_cleaned'])
             
             # Store results
             markets = structured_data.get('markets', [])
@@ -208,8 +217,8 @@ class PolymarketPipeline:
     def run_stage3_storage(self) -> bool:
         """
         Run Stage 3: The Automation & Storage Layer (Scheduling & History)
-        Saves Jina raw data and structured data (if available) in date-organized history directory.
-        Always saves Jina data, and structured data if Stage 2 completed successfully.
+        Moves Jina raw data and structured data (if available) in date-organized history directory.
+        Always moves Jina data, and structured data if Stage 2 completed successfully.
         Returns True if successful, False otherwise.
         """
         try:
@@ -233,32 +242,32 @@ class PolymarketPipeline:
             today_dir = os.path.join(history_dir, today_str)
             os.makedirs(today_dir, exist_ok=True)
             
-            # Copy all files to today's directory
-            files_copied = []
+            # Move all files to today's directory
+            files_moved = []
             
-            # Always copy Jina raw data
+            # Always move Jina raw data
             jina_raw_dest = os.path.join(today_dir, "jina_polymarket_content.txt")
-            shutil.copyfile(jina_raw_src, jina_raw_dest)
-            files_copied.append("jina_polymarket_content.txt")
+            shutil.move(jina_raw_src, jina_raw_dest)
+            files_moved.append("jina_polymarket_content.txt")
             
-            # Always copy Jina JSON data
+            # Always move Jina JSON data
             jina_json_dest = os.path.join(today_dir, "jina_polymarket_data.json")
-            shutil.copyfile(jina_json_src, jina_json_dest)
-            files_copied.append("jina_polymarket_data.json")
+            shutil.move(jina_json_src, jina_json_dest)
+            files_moved.append("jina_polymarket_data.json")
             
-            # Copy structured data if Stage 2 completed successfully
+            # Move structured data if Stage 2 completed successfully
             structured_src = self.output_files['stage2_structured']
             cleaned_src = self.output_files['stage2_cleaned']
             if self.stages_completed['stage2'] and os.path.exists(structured_src):
                 structured_dest = os.path.join(today_dir, "structured_polymarket_data.json")
-                shutil.copyfile(structured_src, structured_dest)
-                files_copied.append("structured_polymarket_data.json")
+                shutil.move(structured_src, structured_dest)
+                files_moved.append("structured_polymarket_data.json")
                 
-                # Also copy cleaned content if it exists
+                # Also move cleaned content if it exists
                 if os.path.exists(cleaned_src):
                     cleaned_dest = os.path.join(today_dir, "cleaned_polymarket_content.txt")
-                    shutil.copyfile(cleaned_src, cleaned_dest)
-                    files_copied.append("cleaned_polymarket_content.txt")
+                    shutil.move(cleaned_src, cleaned_dest)
+                    files_moved.append("cleaned_polymarket_content.txt")
                 
                 has_structured_data = True
             else:
@@ -268,7 +277,7 @@ class PolymarketPipeline:
             summary_data = {
                 "date": today_str,
                 "timestamp": datetime.now().isoformat(),
-                "files_saved": files_copied,
+                "files_saved": files_moved,
                 "has_structured_data": has_structured_data,
                 "pipeline_stages_completed": {
                     "stage1": self.stages_completed['stage1'],
@@ -276,29 +285,26 @@ class PolymarketPipeline:
                     "stage3": True,
                     "stage4": self.stages_completed['stage4']
                 },
-                "file_sizes": {
-                    "jina_polymarket_content.txt": os.path.getsize(jina_raw_dest),
-                    "jina_polymarket_data.json": os.path.getsize(jina_json_dest)
-                }
+                "file_sizes": {}
             }
-            
-            # Add structured data size if available
-            if has_structured_data:
-                summary_data["file_sizes"]["structured_polymarket_data.json"] = os.path.getsize(structured_dest)
+            # Add file sizes
+            for fname in files_moved:
+                fpath = os.path.join(today_dir, fname)
+                summary_data["file_sizes"][fname] = os.path.getsize(fpath)
             
             summary_file = os.path.join(today_dir, "summary.json")
             with open(summary_file, 'w') as f:
                 json.dump(summary_data, f, indent=2)
             
             if has_structured_data:
-                details = f"Complete daily snapshot saved to: {today_dir} ({', '.join(files_copied)})"
+                details = f"Complete daily snapshot moved to: {today_dir} ({', '.join(files_moved)})"
             else:
-                details = f"Raw data snapshot saved to: {today_dir} ({', '.join(files_copied)}) - No structured data available"
+                details = f"Raw data snapshot moved to: {today_dir} ({', '.join(files_moved)}) - No structured data available"
             
             self.print_stage_result(3, True, details)
             self.pipeline_results['stage3'] = {
                 'snapshot_directory': today_dir,
-                'files_saved': files_copied,
+                'files_saved': files_moved,
                 'has_structured_data': has_structured_data,
                 'summary_file': summary_file
             }

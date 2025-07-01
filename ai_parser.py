@@ -123,6 +123,163 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.error(f"Error extracting markdown content: {e}")
             return None
 
+    def chunk_content_by_markets(self, content: str, num_chunks: int = 2) -> List[str]:
+        """
+        Split content into chunks at market boundaries to avoid cutting off markets
+        
+        Args:
+            content: Content to split
+            num_chunks: Number of chunks to create
+            
+        Returns:
+            List of content chunks
+        """
+        lines = content.split('\n')
+        
+        # Find market boundaries (lines that start with market indicators)
+        market_boundaries = []
+        for i, line in enumerate(lines):
+            # Look for lines that indicate new markets
+            if any(indicator in line.lower() for indicator in [
+                'will ', 'what ', 'when ', 'who ', 'how '
+            ]):
+                market_boundaries.append(i)
+        
+        # If we don't have enough market boundaries, fall back to line-based chunking
+        if len(market_boundaries) < num_chunks:
+            logger.warning(f"Only found {len(market_boundaries)} market boundaries, using line-based chunking")
+            return self.chunk_content(content, num_chunks)
+        
+        # Split at market boundaries
+        chunk_size = len(market_boundaries) // num_chunks
+        chunks = []
+        
+        for i in range(num_chunks):
+            start_boundary = i * chunk_size
+            end_boundary = start_boundary + chunk_size if i < num_chunks - 1 else len(market_boundaries)
+            
+            # Get the line indices for this chunk
+            if i == 0:
+                start_line = 0
+            else:
+                start_line = market_boundaries[start_boundary]
+            
+            if i == num_chunks - 1:
+                end_line = len(lines)
+            else:
+                end_line = market_boundaries[end_boundary]
+            
+            chunk_lines = lines[start_line:end_line]
+            chunks.append('\n'.join(chunk_lines))
+            
+            logger.info(f"Chunk {i+1}: lines {start_line}-{end_line} ({len(chunk_lines)} lines)")
+        
+        return chunks
+
+    def chunk_content(self, content: str, num_chunks: int = 2) -> List[str]:
+        """
+        Split content into chunks for processing
+        
+        Args:
+            content: Content to split
+            num_chunks: Number of chunks to create
+            
+        Returns:
+            List of content chunks
+        """
+        lines = content.split('\n')
+        chunk_size = len(lines) // num_chunks
+        
+        chunks = []
+        for i in range(num_chunks):
+            start_idx = i * chunk_size
+            end_idx = start_idx + chunk_size if i < num_chunks - 1 else len(lines)
+            chunk_lines = lines[start_idx:end_idx]
+            chunks.append('\n'.join(chunk_lines))
+        
+        return chunks
+
+    def combine_market_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Combine multiple market parsing results into one
+        
+        Args:
+            results: List of market parsing results
+            
+        Returns:
+            Combined market data
+        """
+        combined_markets = []
+        
+        for result in results:
+            if result and 'markets' in result:
+                combined_markets.extend(result['markets'])
+        
+        return {'markets': combined_markets}
+
+    def parse_with_ai_chunked(self, markdown_content: str, num_chunks: int = 2) -> Optional[Dict[str, Any]]:
+        """
+        Parse markdown content using Gemini AI with chunking
+        
+        Args:
+            markdown_content: Raw markdown content from Jina Reader
+            num_chunks: Number of chunks to split content into
+            
+        Returns:
+            Structured JSON data, or None if parsing failed
+        """
+        try:
+            logger.info(f"Starting chunked AI parsing with {num_chunks} chunks...")
+            
+            # Split content into chunks at market boundaries
+            chunks = self.chunk_content_by_markets(markdown_content, num_chunks)
+            logger.info(f"Split content into {len(chunks)} chunks")
+            
+            # Process each chunk
+            results = []
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} characters)")
+                
+                # Create the prompt for this chunk
+                chunk_prompt = f"{self.system_prompt}\n\nPlease parse the following Polymarket markdown content (chunk {i+1} of {len(chunks)}):\n\n{chunk}"
+                
+                # Generate response from Gemini
+                response = self.model.generate_content(chunk_prompt)
+                
+                if response.text:
+                    logger.info(f"Chunk {i+1} AI parsing completed successfully")
+                    
+                    # Try to extract JSON from the response
+                    json_data = self.extract_json_from_response(response.text)
+                    if json_data:
+                        results.append(json_data)
+                        logger.info(f"Chunk {i+1} extracted {len(json_data.get('markets', []))} markets")
+                    else:
+                        logger.error(f"Failed to extract valid JSON from chunk {i+1}")
+                        # Try fallback to single-chunk processing
+                        logger.info("Attempting fallback to single-chunk processing...")
+                        return self.parse_with_ai(markdown_content)
+                else:
+                    logger.error(f"AI model returned empty response for chunk {i+1}")
+                    # Try fallback to single-chunk processing
+                    logger.info("Attempting fallback to single-chunk processing...")
+                    return self.parse_with_ai(markdown_content)
+            
+            # Combine results
+            if results:
+                combined_result = self.combine_market_results(results)
+                logger.info(f"Combined {len(results)} chunks into {len(combined_result.get('markets', []))} total markets")
+                return combined_result
+            else:
+                logger.error("No valid results from any chunk")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error during chunked AI parsing: {e}")
+            # Try fallback to single-chunk processing
+            logger.info("Attempting fallback to single-chunk processing...")
+            return self.parse_with_ai(markdown_content)
+
     def parse_with_ai(self, markdown_content: str) -> Optional[Dict[str, Any]]:
         """
         Parse markdown content using Gemini AI
@@ -286,12 +443,13 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.error(f"Error saving structured data: {e}")
             return False
 
-    def process_text_content(self, text_file: str = "jina_polymarket_content.txt") -> Optional[Dict[str, Any]]:
+    def process_text_content(self, text_file: str = "jina_polymarket_content.txt", save_files: bool = False) -> Optional[Dict[str, Any]]:
         """
         Process text content file directly and convert to structured JSON
         
         Args:
             text_file: Path to text content file
+            save_files: Whether to save intermediate files (default: False)
             
         Returns:
             Structured JSON data, or None if processing failed
@@ -325,19 +483,21 @@ For markets that are not part of a group, create a **standalone market object**.
                 logger.info("Cleaning content with preprocessor...")
                 cleaned_content = preprocessor.clean_content(raw_content)
                 
-                # Save cleaned content for future use
-                with open(cleaned_file, 'w', encoding='utf-8') as f:
-                    f.write(cleaned_content)
-                logger.info(f"Saved cleaned content to {cleaned_file}")
+                # Save cleaned content only if requested
+                if save_files:
+                    with open(cleaned_file, 'w', encoding='utf-8') as f:
+                        f.write(cleaned_content)
+                    logger.info(f"Saved cleaned content to {cleaned_file}")
             
-            # Parse cleaned content with AI
-            structured_data = self.parse_with_ai(cleaned_content)
+            # Parse cleaned content with AI (using chunking)
+            structured_data = self.parse_with_ai_chunked(cleaned_content)
             if not structured_data:
                 logger.error("AI parsing failed")
                 return None
             
-            # Save structured data
-            self.save_structured_data(structured_data)
+            # Save structured data only if requested
+            if save_files:
+                self.save_structured_data(structured_data)
             
             return structured_data
             
@@ -345,12 +505,13 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.error(f"Error processing text content: {e}")
             return None
 
-    def process_jina_output(self, jina_data_file: str = "jina_polymarket_data.json") -> Optional[Dict[str, Any]]:
+    def process_jina_output(self, jina_data_file: str = "jina_polymarket_data.json", save_files: bool = False) -> Optional[Dict[str, Any]]:
         """
         Process Jina Reader output file and convert to structured JSON
         
         Args:
             jina_data_file: Path to Jina Reader output file
+            save_files: Whether to save intermediate files (default: False)
             
         Returns:
             Structured JSON data, or None if processing failed
@@ -386,19 +547,21 @@ For markets that are not part of a group, create a **standalone market object**.
                 logger.info("Cleaning content with preprocessor...")
                 cleaned_content = preprocessor.clean_content(markdown_content)
                 
-                # Save cleaned content for future use
-                with open(cleaned_file, 'w', encoding='utf-8') as f:
-                    f.write(cleaned_content)
-                logger.info(f"Saved cleaned content to {cleaned_file}")
+                # Save cleaned content only if requested
+                if save_files:
+                    with open(cleaned_file, 'w', encoding='utf-8') as f:
+                        f.write(cleaned_content)
+                    logger.info(f"Saved cleaned content to {cleaned_file}")
             
-            # Parse cleaned content with AI
-            structured_data = self.parse_with_ai(cleaned_content)
+            # Parse cleaned content with AI (using chunking)
+            structured_data = self.parse_with_ai_chunked(cleaned_content)
             if not structured_data:
                 logger.error("AI parsing failed")
                 return None
             
-            # Save structured data
-            self.save_structured_data(structured_data)
+            # Save structured data only if requested
+            if save_files:
+                self.save_structured_data(structured_data)
             
             return structured_data
             
@@ -406,10 +569,13 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.error(f"Error processing Jina output: {e}")
             return None
 
-    def run_full_pipeline(self) -> Optional[Dict[str, Any]]:
+    def run_full_pipeline(self, save_files: bool = False) -> Optional[Dict[str, Any]]:
         """
         Run the complete Stage 2 pipeline: Jina Reader + AI Parsing
         
+        Args:
+            save_files: Whether to save intermediate files (default: False)
+            
         Returns:
             Structured JSON data, or None if pipeline failed
         """
@@ -430,7 +596,7 @@ For markets that are not part of a group, create a **standalone market object**.
                 logger.info("Found existing Jina content. Proceeding with AI parsing...")
             
             # Now run Stage 2 (AI Parsing) with text content
-            structured_data = self.process_text_content()
+            structured_data = self.process_text_content(save_files=save_files)
             
             if structured_data:
                 logger.info("✅ Stage 2 completed successfully!")
