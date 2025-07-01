@@ -38,6 +38,7 @@ jina_polymarket_data.json
 structured_polymarket_data.json
 real_polymarket_structured.json
 test_structured_data.json
+cleaned_polymarket_content.txt
 
 # History directory (optional - remove if you want to track historical data)
 history/

@@ -70,6 +70,7 @@ class PolymarketPipeline:
         self.output_files = {
             'stage1_raw': 'jina_polymarket_content.txt',
             'stage1_json': 'jina_polymarket_data.json',
+            'stage2_cleaned': 'cleaned_polymarket_content.txt',
             'stage2_structured': 'structured_polymarket_data.json',
             'stage3_analytics': 'analytics_report.json',
             'stage4_automation': 'automation_status.json'
@@ -160,7 +161,7 @@ class PolymarketPipeline:
             True if successful, False otherwise
         """
         try:
-            self.print_stage_header(2, "The Intelligence Layer", "Converting raw data to structured JSON using Gemini AI")
+            self.print_stage_header(2, "The Intelligence Layer", "Preprocessing raw data and converting to structured JSON using Gemini AI")
             
             # Check if Stage 1 was completed
             if not self.stages_completed['stage1']:
@@ -172,7 +173,8 @@ class PolymarketPipeline:
             # Initialize Stage 2 parser
             self.stage2_parser = AIPolymarketParser(gemini_api_key=self.gemini_api_key)
             
-            # Run the AI parsing
+            # Run the AI parsing (includes preprocessing)
+            print("🧹 Preprocessing content...")
             print("🧠 Processing with Gemini AI...")
             structured_data = self.stage2_parser.run_full_pipeline()
             
@@ -246,10 +248,18 @@ class PolymarketPipeline:
             
             # Copy structured data if Stage 2 completed successfully
             structured_src = self.output_files['stage2_structured']
+            cleaned_src = self.output_files['stage2_cleaned']
             if self.stages_completed['stage2'] and os.path.exists(structured_src):
                 structured_dest = os.path.join(today_dir, "structured_polymarket_data.json")
                 shutil.copyfile(structured_src, structured_dest)
                 files_copied.append("structured_polymarket_data.json")
+                
+                # Also copy cleaned content if it exists
+                if os.path.exists(cleaned_src):
+                    cleaned_dest = os.path.join(today_dir, "cleaned_polymarket_content.txt")
+                    shutil.copyfile(cleaned_src, cleaned_dest)
+                    files_copied.append("cleaned_polymarket_content.txt")
+                
                 has_structured_data = True
             else:
                 has_structured_data = False
@@ -425,7 +435,7 @@ class PolymarketPipeline:
             if stage_num == 1:
                 files = [self.output_files['stage1_raw'], self.output_files['stage1_json']]
             elif stage_num == 2:
-                files = [self.output_files['stage2_structured']]
+                files = [self.output_files['stage2_cleaned'], self.output_files['stage2_structured']]
             elif stage_num == 3:
                 files = [self.output_files['stage3_analytics']]
             elif stage_num == 4:

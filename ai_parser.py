@@ -10,6 +10,7 @@ import os
 from typing import Optional, Dict, Any, List
 import google.generativeai as genai
 from jina_reader_api import JinaReaderAPI
+from content_preprocessor import ContentPreprocessor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -175,14 +176,21 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.info(f"AI Response preview: {response_text[:200]}...")
             
             # Try to find JSON in the response
-            # Look for JSON blocks marked with ```
+            # Look for JSON blocks marked with ```json
             if '```json' in response_text:
                 start = response_text.find('```json') + 7
                 end = response_text.find('```', start)
                 if end != -1:
                     json_str = response_text[start:end].strip()
                     logger.info(f"Found JSON block with ```json markers: {json_str[:100]}...")
-                    return json.loads(json_str)
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON decode error in ```json block: {e}")
+                        # Try to fix common issues
+                        fixed_json = self.fix_json_string(json_str)
+                        if fixed_json:
+                            return json.loads(fixed_json)
             
             # Look for JSON blocks marked with ```
             if '```' in response_text:
@@ -196,7 +204,10 @@ For markets that are not part of a group, create a **standalone market object**.
                         return json.loads(json_str)
                     except json.JSONDecodeError as e:
                         logger.warning(f"JSON decode error in ``` block: {e}")
-                        pass
+                        # Try to fix common issues
+                        fixed_json = self.fix_json_string(json_str)
+                        if fixed_json:
+                            return json.loads(fixed_json)
             
             # Try to parse the entire response as JSON
             try:
@@ -218,14 +229,41 @@ For markets that are not part of a group, create a **standalone market object**.
                     return json.loads(match)
                 except json.JSONDecodeError as e:
                     logger.warning(f"JSON decode error for match {i+1}: {e}")
+                    # Try to fix common issues
+                    fixed_json = self.fix_json_string(match)
+                    if fixed_json:
+                        try:
+                            return json.loads(fixed_json)
+                        except json.JSONDecodeError:
+                            continue
                     continue
             
             logger.error("Could not extract valid JSON from AI response")
-            logger.error(f"Full response text: {response_text}")
             return None
             
         except Exception as e:
             logger.error(f"Error extracting JSON from response: {e}")
+            return None
+
+    def fix_json_string(self, json_str: str) -> Optional[str]:
+        """
+        Try to fix common JSON formatting issues
+        
+        Args:
+            json_str: Potentially malformed JSON string
+            
+        Returns:
+            Fixed JSON string, or None if cannot be fixed
+        """
+        try:
+            # Remove trailing commas before closing braces/brackets
+            import re
+            fixed = re.sub(r',(\s*[}\]])', r'\1', json_str)
+            
+            # Try to parse the fixed version
+            json.loads(fixed)
+            return fixed
+        except:
             return None
 
     def save_structured_data(self, data: Dict[str, Any], filename: str = "structured_polymarket_data.json") -> bool:
@@ -248,6 +286,65 @@ For markets that are not part of a group, create a **standalone market object**.
             logger.error(f"Error saving structured data: {e}")
             return False
 
+    def process_text_content(self, text_file: str = "jina_polymarket_content.txt") -> Optional[Dict[str, Any]]:
+        """
+        Process text content file directly and convert to structured JSON
+        
+        Args:
+            text_file: Path to text content file
+            
+        Returns:
+            Structured JSON data, or None if processing failed
+        """
+        try:
+            logger.info(f"Processing text content file: {text_file}")
+            
+            # Initialize content preprocessor
+            preprocessor = ContentPreprocessor()
+            
+            # Check if we have cleaned content already
+            cleaned_file = "cleaned_polymarket_content.txt"
+            if os.path.exists(cleaned_file):
+                logger.info(f"Found existing cleaned content: {cleaned_file}")
+                with open(cleaned_file, 'r', encoding='utf-8') as f:
+                    cleaned_content = f.read()
+            else:
+                # Load and clean text content
+                if not os.path.exists(text_file):
+                    logger.error(f"Text content file not found: {text_file}")
+                    return None
+                
+                with open(text_file, 'r', encoding='utf-8') as f:
+                    raw_content = f.read()
+                
+                if not raw_content:
+                    logger.error("No content found in text file")
+                    return None
+                
+                # Clean the content using preprocessor
+                logger.info("Cleaning content with preprocessor...")
+                cleaned_content = preprocessor.clean_content(raw_content)
+                
+                # Save cleaned content for future use
+                with open(cleaned_file, 'w', encoding='utf-8') as f:
+                    f.write(cleaned_content)
+                logger.info(f"Saved cleaned content to {cleaned_file}")
+            
+            # Parse cleaned content with AI
+            structured_data = self.parse_with_ai(cleaned_content)
+            if not structured_data:
+                logger.error("AI parsing failed")
+                return None
+            
+            # Save structured data
+            self.save_structured_data(structured_data)
+            
+            return structured_data
+            
+        except Exception as e:
+            logger.error(f"Error processing text content: {e}")
+            return None
+
     def process_jina_output(self, jina_data_file: str = "jina_polymarket_data.json") -> Optional[Dict[str, Any]]:
         """
         Process Jina Reader output file and convert to structured JSON
@@ -261,22 +358,41 @@ For markets that are not part of a group, create a **standalone market object**.
         try:
             logger.info(f"Processing Jina output file: {jina_data_file}")
             
-            # Load Jina data
-            if not os.path.exists(jina_data_file):
-                logger.error(f"Jina data file not found: {jina_data_file}")
-                return None
+            # Initialize content preprocessor
+            preprocessor = ContentPreprocessor()
             
-            with open(jina_data_file, 'r', encoding='utf-8') as f:
-                jina_data = json.load(f)
+            # Check if we have cleaned content already
+            cleaned_file = "cleaned_polymarket_content.txt"
+            if os.path.exists(cleaned_file):
+                logger.info(f"Found existing cleaned content: {cleaned_file}")
+                with open(cleaned_file, 'r', encoding='utf-8') as f:
+                    cleaned_content = f.read()
+            else:
+                # Load and clean Jina data
+                if not os.path.exists(jina_data_file):
+                    logger.error(f"Jina data file not found: {jina_data_file}")
+                    return None
+                
+                with open(jina_data_file, 'r', encoding='utf-8') as f:
+                    jina_data = json.load(f)
+                
+                # Extract markdown content
+                markdown_content = self.extract_markdown_content(jina_data)
+                if not markdown_content:
+                    logger.error("No markdown content found in Jina data")
+                    return None
+                
+                # Clean the content using preprocessor
+                logger.info("Cleaning content with preprocessor...")
+                cleaned_content = preprocessor.clean_content(markdown_content)
+                
+                # Save cleaned content for future use
+                with open(cleaned_file, 'w', encoding='utf-8') as f:
+                    f.write(cleaned_content)
+                logger.info(f"Saved cleaned content to {cleaned_file}")
             
-            # Extract markdown content
-            markdown_content = self.extract_markdown_content(jina_data)
-            if not markdown_content:
-                logger.error("No markdown content found in Jina data")
-                return None
-            
-            # Parse with AI
-            structured_data = self.parse_with_ai(markdown_content)
+            # Parse cleaned content with AI
+            structured_data = self.parse_with_ai(cleaned_content)
             if not structured_data:
                 logger.error("AI parsing failed")
                 return None
@@ -303,18 +419,18 @@ For markets that are not part of a group, create a **standalone market object**.
             # First, run Stage 1 (Jina Reader) if needed
             jina_parser = JinaReaderAPI()
             
-            # Check if we already have Jina data
-            if not os.path.exists("jina_polymarket_data.json"):
-                logger.info("No existing Jina data found. Running Stage 1 first...")
+            # Check if we already have Jina content
+            if not os.path.exists("jina_polymarket_content.txt"):
+                logger.info("No existing Jina content found. Running Stage 1 first...")
                 text_content, jina_data = jina_parser.parse_and_save()
-                if not jina_data:
+                if not text_content:
                     logger.error("Stage 1 (Jina Reader) failed")
                     return None
             else:
-                logger.info("Found existing Jina data. Proceeding with AI parsing...")
+                logger.info("Found existing Jina content. Proceeding with AI parsing...")
             
-            # Now run Stage 2 (AI Parsing)
-            structured_data = self.process_jina_output()
+            # Now run Stage 2 (AI Parsing) with text content
+            structured_data = self.process_text_content()
             
             if structured_data:
                 logger.info("✅ Stage 2 completed successfully!")
