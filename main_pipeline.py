@@ -20,6 +20,27 @@ from ai_parser import AIPolymarketParser
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def load_env_file(env_file_path: str = '.env') -> None:
+    """
+    Load environment variables from a .env file
+    
+    Args:
+        env_file_path: Path to the .env file
+    """
+    if os.path.exists(env_file_path):
+        try:
+            with open(env_file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        os.environ[key.strip()] = value.strip()
+            logger.info(f"Loaded environment variables from {env_file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load .env file: {e}")
+    else:
+        logger.info(f"No .env file found at {env_file_path}")
+
 class PolymarketPipeline:
     def __init__(self, gemini_api_key: str = None):
         """
@@ -185,30 +206,95 @@ class PolymarketPipeline:
     def run_stage3_storage(self) -> bool:
         """
         Run Stage 3: The Automation & Storage Layer (Scheduling & History)
-        Always saves a snapshot of the structured data with today's date.
+        Saves Jina raw data and structured data (if available) in date-organized history directory.
+        Always saves Jina data, and structured data if Stage 2 completed successfully.
         Returns True if successful, False otherwise.
         """
         try:
-            self.print_stage_header(3, "The Automation & Storage Layer", "Saving a dated snapshot of structured data for historical tracking.")
-            # Allow running if the file exists, even if Stage 2 wasn't run in this session
-            src_file = self.output_files['stage2_structured']
-            if not (self.stages_completed['stage2'] or os.path.exists(src_file)):
-                print("⚠️  Stage 2 not completed and no structured data file found. Cannot save snapshot.")
-                self.print_stage_result(3, False, "Stage 2 required or structured_polymarket_data.json must exist")
+            self.print_stage_header(3, "The Automation & Storage Layer", "Saving dated snapshots of raw and structured data for historical tracking.")
+            
+            # Check if Jina data files exist (Stage 1 output)
+            jina_raw_src = self.output_files['stage1_raw']
+            jina_json_src = self.output_files['stage1_json']
+            
+            if not os.path.exists(jina_raw_src) or not os.path.exists(jina_json_src):
+                print("⚠️  Jina data files not found. Cannot save snapshot.")
+                self.print_stage_result(3, False, "Jina data files not found")
                 return False
+            
             # Ensure history directory exists
             history_dir = "history"
             os.makedirs(history_dir, exist_ok=True)
+            
             # Today's date
             today_str = datetime.now().strftime("%Y-%m-%d")
-            dest_file = os.path.join(history_dir, f"structured-data-{today_str}.json")
-            # Copy the file
-            shutil.copyfile(src_file, dest_file)
-            details = f"Snapshot saved: {dest_file}"
+            today_dir = os.path.join(history_dir, today_str)
+            os.makedirs(today_dir, exist_ok=True)
+            
+            # Copy all files to today's directory
+            files_copied = []
+            
+            # Always copy Jina raw data
+            jina_raw_dest = os.path.join(today_dir, "jina_polymarket_content.txt")
+            shutil.copyfile(jina_raw_src, jina_raw_dest)
+            files_copied.append("jina_polymarket_content.txt")
+            
+            # Always copy Jina JSON data
+            jina_json_dest = os.path.join(today_dir, "jina_polymarket_data.json")
+            shutil.copyfile(jina_json_src, jina_json_dest)
+            files_copied.append("jina_polymarket_data.json")
+            
+            # Copy structured data if Stage 2 completed successfully
+            structured_src = self.output_files['stage2_structured']
+            if self.stages_completed['stage2'] and os.path.exists(structured_src):
+                structured_dest = os.path.join(today_dir, "structured_polymarket_data.json")
+                shutil.copyfile(structured_src, structured_dest)
+                files_copied.append("structured_polymarket_data.json")
+                has_structured_data = True
+            else:
+                has_structured_data = False
+            
+            # Create a summary file for this day's data
+            summary_data = {
+                "date": today_str,
+                "timestamp": datetime.now().isoformat(),
+                "files_saved": files_copied,
+                "has_structured_data": has_structured_data,
+                "pipeline_stages_completed": {
+                    "stage1": self.stages_completed['stage1'],
+                    "stage2": self.stages_completed['stage2'],
+                    "stage3": True,
+                    "stage4": self.stages_completed['stage4']
+                },
+                "file_sizes": {
+                    "jina_polymarket_content.txt": os.path.getsize(jina_raw_dest),
+                    "jina_polymarket_data.json": os.path.getsize(jina_json_dest)
+                }
+            }
+            
+            # Add structured data size if available
+            if has_structured_data:
+                summary_data["file_sizes"]["structured_polymarket_data.json"] = os.path.getsize(structured_dest)
+            
+            summary_file = os.path.join(today_dir, "summary.json")
+            with open(summary_file, 'w') as f:
+                json.dump(summary_data, f, indent=2)
+            
+            if has_structured_data:
+                details = f"Complete daily snapshot saved to: {today_dir} ({', '.join(files_copied)})"
+            else:
+                details = f"Raw data snapshot saved to: {today_dir} ({', '.join(files_copied)}) - No structured data available"
+            
             self.print_stage_result(3, True, details)
-            self.pipeline_results['stage3'] = {'snapshot_file': dest_file}
+            self.pipeline_results['stage3'] = {
+                'snapshot_directory': today_dir,
+                'files_saved': files_copied,
+                'has_structured_data': has_structured_data,
+                'summary_file': summary_file
+            }
             self.stages_completed['stage3'] = True
             return True
+            
         except Exception as e:
             logger.error(f"Stage 3 failed: {e}")
             self.print_stage_result(3, False, f"Error: {str(e)}")
@@ -368,6 +454,9 @@ class PolymarketPipeline:
 def main():
     """Main function to run the pipeline"""
     import argparse
+    
+    # Load environment variables from .env file
+    load_env_file()
     
     parser = argparse.ArgumentParser(description='Polymarket Data Pipeline - Main Orchestrator')
     parser.add_argument('--stages', nargs='+', type=int, choices=[1, 2, 3, 4],
