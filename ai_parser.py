@@ -15,6 +15,27 @@ from jina_reader_api import JinaReaderAPI
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def load_env_file(env_file_path: str = '.env') -> None:
+    """
+    Load environment variables from a .env file
+    
+    Args:
+        env_file_path: Path to the .env file
+    """
+    if os.path.exists(env_file_path):
+        try:
+            with open(env_file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        os.environ[key.strip()] = value.strip()
+            logger.info(f"Loaded environment variables from {env_file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load .env file: {e}")
+    else:
+        logger.info(f"No .env file found at {env_file_path}")
+
 class AIPolymarketParser:
     def __init__(self, gemini_api_key: str = None):
         """
@@ -149,6 +170,10 @@ For markets that are not part of a group, create a **standalone market object**.
             Parsed JSON data, or None if extraction failed
         """
         try:
+            # Debug: Log the response for troubleshooting
+            logger.info(f"AI Response length: {len(response_text)} characters")
+            logger.info(f"AI Response preview: {response_text[:200]}...")
+            
             # Try to find JSON in the response
             # Look for JSON blocks marked with ```
             if '```json' in response_text:
@@ -156,6 +181,7 @@ For markets that are not part of a group, create a **standalone market object**.
                 end = response_text.find('```', start)
                 if end != -1:
                     json_str = response_text[start:end].strip()
+                    logger.info(f"Found JSON block with ```json markers: {json_str[:100]}...")
                     return json.loads(json_str)
             
             # Look for JSON blocks marked with ```
@@ -164,16 +190,20 @@ For markets that are not part of a group, create a **standalone market object**.
                 end = response_text.find('```', start)
                 if end != -1:
                     json_str = response_text[start:end].strip()
+                    logger.info(f"Found JSON block with ``` markers: {json_str[:100]}...")
                     # Try to parse as JSON
                     try:
                         return json.loads(json_str)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON decode error in ``` block: {e}")
                         pass
             
             # Try to parse the entire response as JSON
             try:
+                logger.info("Attempting to parse entire response as JSON...")
                 return json.loads(response_text.strip())
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON decode error for entire response: {e}")
                 pass
             
             # If all else fails, try to find JSON-like content
@@ -181,14 +211,17 @@ For markets that are not part of a group, create a **standalone market object**.
             json_pattern = r'\{.*\}'
             matches = re.findall(json_pattern, response_text, re.DOTALL)
             
-            for match in matches:
+            logger.info(f"Found {len(matches)} potential JSON matches with regex")
+            for i, match in enumerate(matches):
                 try:
+                    logger.info(f"Trying to parse match {i+1}: {match[:100]}...")
                     return json.loads(match)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON decode error for match {i+1}: {e}")
                     continue
             
             logger.error("Could not extract valid JSON from AI response")
-            logger.debug(f"Response text: {response_text[:500]}...")
+            logger.error(f"Full response text: {response_text}")
             return None
             
         except Exception as e:
@@ -298,6 +331,9 @@ def main():
     """Main function to run the AI Parser"""
     print("🧠 AI Polymarket Parser - Stage 2")
     print("=" * 50)
+    
+    # Load environment variables from .env file
+    load_env_file()
     
     try:
         # Initialize AI parser

@@ -307,6 +307,15 @@ For questions, issues, or contributions:
 - **GitHub Issues**: [Create an issue](https://github.com/nelithb/polymarket-trendwatch/issues)
 - **Email**: nelith.bandularatne@gmail.com
 
+## Known Issues
+
+### Gemini AI JSON Truncation on Large Inputs
+
+- When processing large Polymarket markdown files, the Gemini AI model may return a response that is truncated (cut off) due to output length/token limits.
+- This results in invalid or incomplete JSON, causing the pipeline to fail at the extraction step.
+- **Workaround:** For now, you can test with smaller input (e.g., only the first 1000 characters of the markdown) to confirm the pipeline works for small data.
+- **Future Solution:** Implement chunking or pagination to process large markdown in smaller pieces and merge the results.
+
 ---
 
 **🚀 Happy Data Mining!**
